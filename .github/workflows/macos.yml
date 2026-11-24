@@ -1,5 +1,10 @@
 name: Build Samplebrain (macOS)
 
+# Builds one universal Samplebrain.app (Apple Silicon + Intel) on an Apple
+# Silicon runner. Qt comes from the official universal binaries; the audio
+# libraries are compiled here for both architectures and linked statically,
+# so the app doesn't depend on Homebrew (which no longer ships Intel bottles).
+
 on:
   push:
     branches: [ main, master ]
@@ -10,77 +15,137 @@ on:
 permissions:
   contents: write
 
+env:
+  ARCHS: "arm64;x86_64"
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+  PORTAUDIO_TAG: v19.7.0
+  FFTW_VERSION: 3.3.10
+  SNDFILE_VERSION: 1.2.2
+  LIBLO_VERSION: "0.32"
+
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Pinned to macOS 15 so the Homebrew libraries bundled into the app
-          # run on macOS 15 (Sequoia) and later.
-          - os: macos-15
-            arch: arm64
-          - os: macos-15-intel
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew update
-          brew install portaudio fftw libsndfile liblo
-          # Qt 6 (Homebrew has split it into modules on newer versions)
-          brew install qtbase qttools || brew install qt
+      - name: Install Qt (universal)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: mac
+          target: desktop
+          arch: clang_64
+          cache: true
 
-      - name: Build
+      - name: Cache audio libraries
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deps
+          key: deps-${{ runner.os }}-pa${{ env.PORTAUDIO_TAG }}-fftw${{ env.FFTW_VERSION }}-sf${{ env.SNDFILE_VERSION }}-lo${{ env.LIBLO_VERSION }}-t${{ env.MACOSX_DEPLOYMENT_TARGET }}-v1
+
+      - name: Build audio libraries (universal, static)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
+          set -euo pipefail
+          DEPS="$RUNNER_TEMP/deps"
+          SRC="$RUNNER_TEMP/src"
+          mkdir -p "$SRC" && cd "$SRC"
+
+          CM=(-DCMAKE_INSTALL_PREFIX="$DEPS" -DCMAKE_BUILD_TYPE=Release
+              -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+              -DCMAKE_OSX_ARCHITECTURES="$ARCHS"
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+              -DCMAKE_IGNORE_PREFIX_PATH="/opt/homebrew;/usr/local")
+
+          git clone -q --depth 1 -b "$PORTAUDIO_TAG" https://github.com/PortAudio/portaudio
+          cmake -S portaudio -B build-pa "${CM[@]}" -DPA_BUILD_SHARED=OFF -DPA_BUILD_STATIC=ON
+          cmake --build build-pa -j"$(sysctl -n hw.ncpu)" && cmake --install build-pa
+
+          curl -fsSL -o fftw.tar.gz "https://www.fftw.org/fftw-${FFTW_VERSION}.tar.gz"
+          tar xzf fftw.tar.gz
+          cmake -S "fftw-${FFTW_VERSION}" -B build-fftw "${CM[@]}" -DBUILD_TESTS=OFF -DENABLE_THREADS=OFF
+          cmake --build build-fftw -j"$(sysctl -n hw.ncpu)" && cmake --install build-fftw
+
+          curl -fsSL -o sndfile.tar.xz "https://github.com/libsndfile/libsndfile/releases/download/${SNDFILE_VERSION}/libsndfile-${SNDFILE_VERSION}.tar.xz"
+          tar xJf sndfile.tar.xz
+          cmake -S "libsndfile-${SNDFILE_VERSION}" -B build-sf "${CM[@]}" \
+            -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+            -DENABLE_EXTERNAL_LIBS=OFF -DENABLE_MPEG=OFF -DENABLE_CPACK=OFF
+          cmake --build build-sf -j"$(sysctl -n hw.ncpu)" && cmake --install build-sf
+
+          curl -fsSL -o liblo.tar.gz "https://github.com/radarsat1/liblo/releases/download/${LIBLO_VERSION}/liblo-${LIBLO_VERSION}.tar.gz"
+          tar xzf liblo.tar.gz
+          cmake -S "liblo-${LIBLO_VERSION}/cmake" -B build-lo "${CM[@]}" \
+            -DWITH_TOOLS=OFF -DWITH_TESTS=OFF -DWITH_EXAMPLES=OFF -DWITH_CPP_TESTS=OFF -DWITH_STATIC=ON
+          cmake --build build-lo -j"$(sysctl -n hw.ncpu)" && cmake --install build-lo
+
+      - name: Check audio libraries
+        run: |
+          DEPS="$RUNNER_TEMP/deps"
+          for l in libportaudio libfftw3 libsndfile liblo; do
+            printf '%-14s ' "$l"; lipo -archs "$DEPS/lib/$l.a"
+          done
+
+      - name: Build app
+        run: |
+          set -euo pipefail
+          export SAMPLEBRAIN_DEPS="$RUNNER_TEMP/deps"
           qmake -v
-          qmake samplebrain.pro CONFIG+=release
+          qmake samplebrain.pro CONFIG+=release \
+            QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64" \
+            QMAKE_MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
           make -j"$(sysctl -n hw.ncpu)"
-          ls -la samplebrain.app/Contents/MacOS
+          lipo -archs samplebrain.app/Contents/MacOS/samplebrain
 
-      - name: Bundle libraries into the app
+      - name: Bundle Qt into the app and sign
         run: |
-          APP=samplebrain.app
-          MDQ="$(command -v macdeployqt || find "$(brew --prefix)/opt" -name macdeployqt -type f 2>/dev/null | head -1)"
-          echo "Using $MDQ"
-          "$MDQ" "$APP" -always-overwrite -verbose=1
+          set -euo pipefail
+          macdeployqt samplebrain.app -always-overwrite
+          mv samplebrain.app Samplebrain.app
+          PL=Samplebrain.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.thentrythis.Samplebrain" "$PL" || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleName string Samplebrain" "$PL" 2>/dev/null || /usr/libexec/PlistBuddy -c "Set :CFBundleName Samplebrain" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Samplebrain" "$PL" 2>/dev/null || true
 
-          # Make sure nothing still points at Homebrew
-          echo "--- remaining external references ---"
-          if find "$APP" -type f \( -perm +111 -o -name '*.dylib' \) -exec otool -L {} \; 2>/dev/null \
-               | grep -E '/opt/homebrew|/usr/local/(opt|Cellar|lib)'; then
-            echo "::error::App still links to Homebrew libraries"; exit 1
+          echo "--- external libraries the app links to ---"
+          otool -L Samplebrain.app/Contents/MacOS/samplebrain
+          if find Samplebrain.app -type f -perm +111 -exec otool -L {} \; 2>/dev/null \
+               | grep -E '/opt/homebrew|/usr/local|/Users/runner'; then
+            echo "::error::App links to libraries outside the bundle"; exit 1
           fi
-          echo "none"
 
-          # Nicer app name
-          mv "$APP" Samplebrain.app
-          /usr/libexec/PlistBuddy -c "Set :CFBundleName Samplebrain" Samplebrain.app/Contents/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Samplebrain" Samplebrain.app/Contents/Info.plist || true
-          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.thentrythis.Samplebrain" Samplebrain.app/Contents/Info.plist || true
-
-          # Ad-hoc sign (required for Apple Silicon to launch it)
+          # Ad-hoc signature (Apple Silicon won't launch unsigned code)
           codesign --force --deep --sign - Samplebrain.app
           codesign --verify --deep --strict --verbose=2 Samplebrain.app
 
-      - name: Smoke test
+      - name: Smoke test (both architectures)
         run: |
-          QT_QPA_PLATFORM=offscreen ./Samplebrain.app/Contents/MacOS/samplebrain &
-          PID=$!
-          sleep 8
-          if kill -0 $PID 2>/dev/null; then echo "App is running"; kill $PID; else echo "::error::App exited early"; wait $PID; exit 1; fi
+          run_for() {
+            "$@" &
+            PID=$!; sleep 8
+            if kill -0 $PID 2>/dev/null; then echo "OK: $*"; kill $PID; return 0; fi
+            echo "::error::Exited early: $*"; wait $PID; return 1
+          }
+          export QT_QPA_PLATFORM=offscreen
+          run_for ./Samplebrain.app/Contents/MacOS/samplebrain
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            run_for arch -x86_64 ./Samplebrain.app/Contents/MacOS/samplebrain
+          else
+            echo "::warning::Rosetta not available on runner; Intel slice not run-tested"
+          fi
 
       - name: Package
         run: |
           mkdir -p dist
-          ditto -c -k --keepParent Samplebrain.app "dist/Samplebrain-macOS-${{ matrix.arch }}.zip"
+          ditto -c -k --keepParent Samplebrain.app dist/Samplebrain-macOS-universal.zip
           ls -la dist
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Samplebrain-macOS-${{ matrix.arch }}
+          name: Samplebrain-macOS-universal
           path: dist/*.zip
           if-no-files-found: error
 

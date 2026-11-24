@@ -45,9 +45,21 @@ SOURCES += app/MainWindow.cpp \
            brain/src/spiralcore/stream.cpp
 
 INCLUDEPATH += brain/src
-INCLUDEPATH += /usr/local/include
-INCLUDEPATH += /opt/homebrew/include
-LIBS += -L.. -L/usr/local/lib -L/opt/homebrew/lib -lportaudio -lfftw3 -lsndfile -llo -ldl -lpthread -lm
+
+# Set SAMPLEBRAIN_DEPS to a prefix containing static builds of portaudio,
+# fftw3, libsndfile and liblo to link them into the app (used by the macOS
+# CI build so the app is self-contained and universal arm64 + x86_64).
+DEPS = $$(SAMPLEBRAIN_DEPS)
+!isEmpty(DEPS) {
+    INCLUDEPATH += $$DEPS/include
+    LIBS += $$DEPS/lib/libportaudio.a $$DEPS/lib/libfftw3.a $$DEPS/lib/libsndfile.a $$DEPS/lib/liblo.a -lpthread -lm
+    macx: LIBS += -framework CoreAudio -framework AudioToolbox -framework AudioUnit -framework CoreFoundation -framework CoreServices
+    unix:!macx: LIBS += -lasound -ldl
+} else {
+    INCLUDEPATH += /usr/local/include
+    INCLUDEPATH += /opt/homebrew/include
+    LIBS += -L.. -L/usr/local/lib -L/opt/homebrew/lib -lportaudio -lfftw3 -lsndfile -llo -ldl -lpthread -lm
+}
 
 QMAKE_CXXFLAGS += -O3 -Wall -Wno-unused -std=c++17
 
