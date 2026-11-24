@@ -1,0 +1,99 @@
+name: Build Samplebrain (macOS)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned to macOS 15 so the Homebrew libraries bundled into the app
+          # run on macOS 15 (Sequoia) and later.
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install portaudio fftw libsndfile liblo
+          # Qt 6 (Homebrew has split it into modules on newer versions)
+          brew install qtbase qttools || brew install qt
+
+      - name: Build
+        run: |
+          qmake -v
+          qmake samplebrain.pro CONFIG+=release
+          make -j"$(sysctl -n hw.ncpu)"
+          ls -la samplebrain.app/Contents/MacOS
+
+      - name: Bundle libraries into the app
+        run: |
+          APP=samplebrain.app
+          MDQ="$(command -v macdeployqt || find "$(brew --prefix)/opt" -name macdeployqt -type f 2>/dev/null | head -1)"
+          echo "Using $MDQ"
+          "$MDQ" "$APP" -always-overwrite -verbose=1
+
+          # Make sure nothing still points at Homebrew
+          echo "--- remaining external references ---"
+          if find "$APP" -type f \( -perm +111 -o -name '*.dylib' \) -exec otool -L {} \; 2>/dev/null \
+               | grep -E '/opt/homebrew|/usr/local/(opt|Cellar|lib)'; then
+            echo "::error::App still links to Homebrew libraries"; exit 1
+          fi
+          echo "none"
+
+          # Nicer app name
+          mv "$APP" Samplebrain.app
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName Samplebrain" Samplebrain.app/Contents/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Samplebrain" Samplebrain.app/Contents/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.thentrythis.Samplebrain" Samplebrain.app/Contents/Info.plist || true
+
+          # Ad-hoc sign (required for Apple Silicon to launch it)
+          codesign --force --deep --sign - Samplebrain.app
+          codesign --verify --deep --strict --verbose=2 Samplebrain.app
+
+      - name: Smoke test
+        run: |
+          QT_QPA_PLATFORM=offscreen ./Samplebrain.app/Contents/MacOS/samplebrain &
+          PID=$!
+          sleep 8
+          if kill -0 $PID 2>/dev/null; then echo "App is running"; kill $PID; else echo "::error::App exited early"; wait $PID; exit 1; fi
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent Samplebrain.app "dist/Samplebrain-macOS-${{ matrix.arch }}.zip"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Samplebrain-macOS-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

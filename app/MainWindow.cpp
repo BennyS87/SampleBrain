@@ -35,9 +35,9 @@ MainWindow::MainWindow() :
   m_sound_item_delete_mapper = new QSignalMapper(this);
 
   connect(m_sound_item_enable_mapper,
-          SIGNAL(mapped(int)), this, SLOT(sound_enable(int)));
+          SIGNAL(mappedInt(int)), this, SLOT(sound_enable(int)));
   connect(m_sound_item_delete_mapper,
-          SIGNAL(mapped(int)), this, SLOT(delete_sound(int)));
+          SIGNAL(mappedInt(int)), this, SLOT(delete_sound(int)));
 
   m_Ui.setupUi(this);
   setUnifiedTitleAndToolBarOnMac(true);
@@ -72,7 +72,7 @@ MainWindow::MainWindow() :
       m_destinations.push_back(d);
     }
 
-    connect(enable_mapper, SIGNAL(mapped(int)), this, SLOT(net_enable(int)));
+    connect(enable_mapper, SIGNAL(mappedInt(int)), this, SLOT(net_enable(int)));
 
     m_Ui.netContainer->addItem(new QSpacerItem(20, 40, QSizePolicy::Minimum, QSizePolicy::Expanding));
 

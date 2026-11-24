@@ -49,7 +49,7 @@ INCLUDEPATH += /usr/local/include
 INCLUDEPATH += /opt/homebrew/include
 LIBS += -L.. -L/usr/local/lib -L/opt/homebrew/lib -lportaudio -lfftw3 -lsndfile -llo -ldl -lpthread -lm
 
-QMAKE_CXXFLAGS += -O3 -Wall -Wno-unused -std=c++11
+QMAKE_CXXFLAGS += -O3 -Wall -Wno-unused -std=c++17
 
 # assets
 RESOURCES = app/samplebrain.qrc
