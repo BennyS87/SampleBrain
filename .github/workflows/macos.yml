@@ -1,7 +1,7 @@
 name: Build Samplebrain (macOS)
 
-# Builds one universal Samplebrain.app (Apple Silicon + Intel) on an Apple
-# Silicon runner. Qt comes from the official universal binaries; the audio
+# Builds one universal Samplebrain.app (Apple Silicon + Intel) on a GitHub
+# macOS runner. Qt comes from the official universal binaries; the audio
 # libraries are compiled here for both architectures and linked statically,
 # so the app doesn't depend on Homebrew (which no longer ships Intel bottles).
 
@@ -25,7 +25,9 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Intel runner: Apple Silicon runners are often capacity-constrained.
+    # The output is universal either way.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
