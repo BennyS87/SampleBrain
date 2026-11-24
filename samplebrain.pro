@@ -32,6 +32,7 @@ SOURCES += app/MainWindow.cpp \
            brain/src/status.cpp \
            brain/src/window.cpp \
            brain/src/block_stream.cpp \
+           brain/src/mp3_loader.cpp \
            brain/src/aquila/filter/MelFilterBank.cpp \
            brain/src/aquila/filter/MelFilter.cpp \
            brain/src/aquila/transform/Dct.cpp \

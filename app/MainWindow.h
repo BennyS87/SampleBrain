@@ -18,6 +18,7 @@
 #include <QDirIterator>
 #include <QFileDialog>
 #include <QLineEdit>
+#include <QMessageBox>
 #include "ui_samplebrain.h"
 #include "SettingsDialog.h"
 
@@ -42,7 +43,7 @@ public:
   // all this to work around liblo's use of varargs...
   void send_audio_osc(const char *name, const char *types) {
     for (auto dest:m_destinations) {
-      if (dest.m_enabled) {
+      if (dest.m_enabled && dest.m_audio_address) {
         lo_send(dest.m_audio_address,name,types);
       }
     }
@@ -51,7 +52,7 @@ public:
   template <class T>
   void send_audio_osc(const char *name, const char *types, T val) {
     for (auto dest:m_destinations) {
-      if (dest.m_enabled) {
+      if (dest.m_enabled && dest.m_audio_address) {
         lo_send(dest.m_audio_address,name,types,val);
       }
     }
@@ -59,7 +60,7 @@ public:
 
   void send_process_osc(const char *name, const char *types) {
     for (auto dest:m_destinations) {
-      if (dest.m_enabled) {
+      if (dest.m_enabled && dest.m_process_address) {
         lo_send(dest.m_process_address,name,types);
       }
     }
@@ -68,7 +69,7 @@ public:
   template <class T>
   void send_process_osc(const char *name, const char *types, T val) {
     for (auto dest:m_destinations) {
-      if (dest.m_enabled) {
+      if (dest.m_enabled && dest.m_process_address) {
         lo_send(dest.m_process_address,name,types,val);
       }
     }
@@ -197,9 +198,10 @@ private slots:
     void load_target() {
         m_last_file=QFileDialog::getOpenFileName(
             this,
-            QString("Select an wav file"),
+            QString("Select a sound file"),
             m_last_file,
-            QString("Sounds (*.wav)"));
+            QString("Sounds (*.wav *.mp3 *.aif *.aiff);;All files (*)"));
+        if (m_last_file.isEmpty()) return;
 
         send_process_osc("/load_target","s",m_last_file.toStdString().c_str());
     }
@@ -213,9 +215,10 @@ private slots:
     void load_sound() {
         m_last_file=QFileDialog::getOpenFileName(
             this,
-            QString("Select a wav file"),
+            QString("Select a sound file"),
             m_last_file,
-            QString("Sounds (*.wav)"));
+            QString("Sounds (*.wav *.mp3 *.aif *.aiff);;All files (*)"));
+        if (m_last_file.isEmpty()) return;
 
         send_process_osc("/load_sample","s",m_last_file.toStdString().c_str());
 
@@ -228,17 +231,22 @@ private slots:
     }
 
 
+   static bool is_sound_file(const QString &path) {
+     QString ext = QFileInfo(path).suffix().toLower();
+     return ext=="wav" || ext=="mp3" || ext=="aif" || ext=="aiff";
+   }
+
    void load_sounds() {
      m_last_file=QFileDialog::getExistingDirectory(this,
                                                    QString("Select a directory"),
                                                    m_last_file);
-
+     if (m_last_file.isEmpty()) return;
 
      QDirIterator dirIt(m_last_file,QDirIterator::Subdirectories);
      while (dirIt.hasNext()) {
        dirIt.next();
        if (QFileInfo(dirIt.filePath()).isFile() &&
-           QFileInfo(dirIt.filePath()).suffix() == "wav") {
+           is_sound_file(dirIt.filePath())) {
          send_process_osc("/load_sample","s",dirIt.filePath().toStdString().c_str());
 
          sound_items::sound_item &si = m_sound_items.add(m_Ui.brain_contents, dirIt.filePath().toStdString(),true);
@@ -382,11 +390,27 @@ private slots:
 
       if (d.m_enable->isChecked()) {
         // reconnect
-        string url = d.m_address->text().toUtf8().constData();
-        lo_address_free(d.m_audio_address);
-        lo_address_free(d.m_process_address);
+        string url = d.m_address->text().trimmed().toUtf8().constData();
+        // allow plain hostnames/IPs ("192.168.1.5") as well as full osc urls
+        if (url.find("://")==string::npos) url = "osc.udp://"+url;
+        if (d.m_audio_address) lo_address_free(d.m_audio_address);
+        if (d.m_process_address) lo_address_free(d.m_process_address);
         d.m_audio_address = lo_address_new_from_url(string(url+":8888").c_str());
         d.m_process_address = lo_address_new_from_url(string(url+":8889").c_str());
+        if (!d.m_audio_address || !d.m_process_address ||
+            d.m_address->text().trimmed().isEmpty()) {
+          // bad/empty address - don't enable, otherwise every control change crashes
+          if (d.m_audio_address) lo_address_free(d.m_audio_address);
+          if (d.m_process_address) lo_address_free(d.m_process_address);
+          d.m_audio_address = NULL;
+          d.m_process_address = NULL;
+          d.m_enabled=false;
+          d.m_enable->setChecked(false);
+          QMessageBox::warning(this, "Network",
+            QString("Can't send to \"%1\" - enter an address like osc.udp://localhost or 192.168.1.5")
+              .arg(d.m_address->text()));
+          return;
+        }
         // start sending messages here
         d.m_enabled=true;
       } else {

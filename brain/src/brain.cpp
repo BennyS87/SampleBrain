@@ -21,6 +21,8 @@
 #include <spiralcore/audio.h>
 #include "brain.h"
 #include "status.h"
+#include "mp3_loader.h"
+#include <vector>
 
 using namespace std;
 using namespace spiralcore;
@@ -40,36 +42,56 @@ brain::brain() :
 // load, chop up and add to brain
 // todo: add tags
 void brain::load_sound(std::string filename, stereo_mode mode) {
+  std::vector<float> temp;
+  u32 channels=0;
+  u64 frames=0;
+
   SF_INFO sfinfo;
   sfinfo.format=0;
   SNDFILE* f=sf_open(filename.c_str(), SFM_READ, &sfinfo);
   if (f!=NULL) {
-    sample s(sfinfo.frames);
-    float *temp = new float[sfinfo.channels * sfinfo.frames];
+    channels=sfinfo.channels;
+    frames=sfinfo.frames;
+    temp.resize((size_t)channels*frames);
+    sf_read_float(f, temp.data(), (sf_count_t)channels*frames);
+    sf_close(f);
+  } else {
+    // libsndfile couldn't read it - try decoding as mp3
+    unsigned long long mp3_frames=0;
+    unsigned int mp3_rate=0;
+    if (!load_mp3(filename, temp, channels, mp3_frames, mp3_rate)) {
+      status::update("couldn't load %s",filename.c_str());
+      return;
+    }
+    frames=mp3_frames;
+  }
 
-    sf_read_float(f, temp, sfinfo.channels * sfinfo.frames);
+  if (channels==0 || frames==0) {
+    status::update("no audio in %s",filename.c_str());
+    return;
+  }
 
-    if (mode==MIX) {
-      for(u32 i=0; i<sfinfo.frames; i++) {
-	s[i]=0;
-	// mix down stereo to mono
-	for(s32 j = 0; j < sfinfo.channels; j++) {
-	  s[i]+=temp[i*sfinfo.channels + j];
-	}
-      }
-    } else {
-      // just take one channel (assume stereo, split if mono)
-      for(u32 i=0; i<sfinfo.frames; i++) {
-	u32 si=i*sfinfo.channels;
-	if (mode==RIGHT && sfinfo.channels>1) si++;
-	s[i]=temp[si];
+  sample s((u32)frames);
+
+  if (mode==MIX) {
+    for(u32 i=0; i<frames; i++) {
+      s[i]=0;
+      // mix down stereo to mono
+      for(u32 j = 0; j < channels; j++) {
+        s[i]+=temp[(size_t)i*channels + j];
       }
     }
-
-    delete[] temp;
-    m_samples.push_back(sound(filename,s));
-    status::update("loaded %s",filename.c_str());
+  } else {
+    // just take one channel (assume stereo, split if mono)
+    for(u32 i=0; i<frames; i++) {
+      size_t si=(size_t)i*channels;
+      if (mode==RIGHT && channels>1) si++;
+      s[i]=temp[si];
+    }
   }
+
+  m_samples.push_back(sound(filename,s));
+  status::update("loaded %s",filename.c_str());
 }
 
 void brain::delete_sound(std::string filename) {
